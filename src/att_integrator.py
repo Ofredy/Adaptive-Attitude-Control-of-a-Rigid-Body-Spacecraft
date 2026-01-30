@@ -118,10 +118,11 @@ class AttIntegrator:
 
         # Step 4: Compute control torque
         control_torque = (
-            -self.k * mrp_b_r_k                         # Proportional term (error in attitude)
+            - self.k * mrp_b_r_k                         # Proportional term (error in attitude)
             - ( self.p + self.k_integral * self.p @ self.estimated_inertia_tensor ) @ w_b_r_k # Damping term (relative angular velocity)
             - self.k * self.k_integral * self.p @ state_sum + self.k_integral * self.p @ self.estimated_inertia_tensor @ w_b_r_0 # integral term
-            + self.estimated_inertia_tensor @ (w_r_n_dot_b - np.cross(w_b_n_k, w_r_n_b))  # Inertia term
+            + self.estimated_inertia_tensor @ (w_r_n_dot_b - np.cross(w_b_n_k, w_r_n_b))  # w_r_n correction term
+            + helper_functions.get_tilde_matrix(w_b_n_k) @ (self.estimated_inertia_tensor @ w_b_n_k) # inertia term correction
         )
 
         return control_torque
@@ -148,9 +149,8 @@ class AttIntegrator:
         mrp_b_n_dot = ( 1/4 ) * ( ( 1 - mrp_b_n_norm**2 ) * np.eye(3) + 2 * mrp_b_n_tilde + 2 * np.outer(mrp_b_n_k, mrp_b_n_k) ) @ w_b_n_k
 
         # solving for w_b_n_dot_k
-
-        ##### NOTE #### this is not right -> one of the terms canceled in the control law before but no longer the case
-        w_b_n_dot = np.linalg.inv(self.actual_inertia_tensor) @ ( self.get_att_track_control_k(x_k, t) + self.unmodeled_torque ) 
+        w_b_n_tilde = helper_functions.get_tilde_matrix(w_b_n_k)     # \tilde{ω}
+        w_b_n_dot = np.linalg.inv(self.actual_inertia_tensor) @ ( self.get_att_track_control_k(x_k, t) + self.unmodeled_torque - w_b_n_tilde @ (self.actual_inertia_tensor @ w_b_n_k) ) 
 
         # tracking state_sum
         state_sum_dot = mrp_b_r_k
