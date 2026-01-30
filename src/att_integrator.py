@@ -1,0 +1,204 @@
+# library imports
+import numpy as np
+
+# our imports
+import integrator, helper_functions, mrp_functions
+
+
+class AttIntegrator:
+
+    def __init__(self, 
+                 mrp_b_n_0, w_b_n_0,
+                 unmodeled_torque, 
+                 actual_inertia_tensor, estimated_inertia_tensor, 
+                 k, k_integral, p, 
+                 f=0.05,
+                 total_time=120.0, dt=0.01):
+        
+        # intial conditions
+        self.mrp_b_n_0 = mrp_b_n_0
+        self.w_b_n_0 = w_b_n_0
+
+        # unmodeled torque 
+        self.unmodeled_torque = unmodeled_torque
+
+        # inertia tensor properties
+        self.actual_inertia_tensor = actual_inertia_tensor
+        self.estimated_inertia_tensor = estimated_inertia_tensor
+
+        # feedback gain terms
+        self.k = k 
+        self.k_integral = k_integral
+        self.p = p
+
+        # reference generation frequency
+        self.f = f
+
+        # sim constants
+        self.total_time = total_time
+        self.dt = dt
+
+    def get_target_mrp_r_n(self, t):
+
+        return np.array([ 0.2 * np.sin( self.f*t ), 0.3 * np.cos( self.f*t ), -0.3 * np.sin( self.f*t ) ])
+
+    def get_target_mrp_r_n_dot(self, t):
+
+        return np.array([ 0.2 * self.f * np.cos( self.f*t ), -0.3 * self.f * np.sin( self.f*t ), -0.3 * self.f * np.cos( self.f*t ) ])
+
+    def get_target_w_r_n(self, t):
+
+        # solving for mrp_r_n_k
+        mrp_r_n_k = self.get_target_mrp_r_n(t)
+
+        # solving for w_r_n
+        mrp_r_n_dot_k = self.get_target_mrp_r_n_dot(t)
+
+        mrp_r_n_norm = np.linalg.norm(mrp_r_n_k)
+        mrp_r_n_tilde = helper_functions.get_tilde_matrix(mrp_r_n_k)
+
+        return 4 * np.linalg.inv( ( 1 - mrp_r_n_norm**2 ) * np.eye(3) + 2 * mrp_r_n_tilde + 2 * np.outer(mrp_r_n_k, mrp_r_n_k) ) @ mrp_r_n_dot_k
+
+    def get_target_info(self, t, dt):
+
+        # solving for mrp_r_n_k
+        mrp_r_n_k = self.get_target_mrp_r_n(t)
+
+        # solving for w_r_n
+        w_r_n_k = self.get_target_w_r_n(t)
+
+        # solving for  w_r_n_dot_k
+        w_r_n_dot_k = ( w_r_n_k - self.get_target_w_r_n(t-dt) ) / dt
+
+        return mrp_r_n_k, w_r_n_k, w_r_n_dot_k
+
+    def get_mrp_b_r(self, mrp_b_n_k, mrp_r_n_k):
+        """
+        Compute the MRP of frame B relative to frame R.
+
+        Args:
+            mrp_b_n_k: MRP of B relative to N.
+            mrp_r_n_k: MRP of R relative to N.
+
+        Returns:
+            mrp_b_r: MRP of B relative to R.
+        """
+        return mrp_functions.mrp_addition(mrp_b_n_k, mrp_functions.invert_mrp(mrp_r_n_k))
+
+    def get_att_track_control_k(self, x_k, t):
+        """
+        Compute the control torque for attitude tracking.
+
+        Args:
+            x_k: Current state [MRP_B/N, w_B/N].
+            t: Current time.
+
+        Returns:
+            Control torque vector (u).
+        """
+        # State decomposition
+        mrp_b_n_k = x_k[:3]  # MRP_B/N
+        w_b_n_k = x_k[3:6]   # Angular velocity_B/N (in B)
+        state_sum = x_k[6:9]
+        w_b_r_0 = x_k[9:]
+
+        # Target info
+        mrp_r_n_k, w_r_n_k, w_r_n_dot_k = self.get_target_info(t, self.dt)  # Target MRP and angular velocity
+
+        # Step 1: Compute relative MRP (sigma_B/R)
+        mrp_b_r_k = self.get_mrp_b_r(mrp_b_n_k, mrp_r_n_k)
+
+        # Step 2: Transform target angular velocity and acceleration to Body frame
+        dcm_b_r = mrp_functions.mrp_to_dcm(mrp_b_r_k)  # DCM from R to B
+        w_r_n_b = dcm_b_r @ w_r_n_k                   # Transform w_R/N to Body frame
+        w_r_n_dot_b = dcm_b_r @ w_r_n_dot_k           # Transform w_R/N_dot to Body frame
+
+        # Step 3: Compute relative angular velocity (omega_B/R in Body frame)
+        w_b_r_k = w_b_n_k - w_r_n_b
+
+        # Step 4: Compute control torque
+        control_torque = (
+            -self.k * mrp_b_r_k                         # Proportional term (error in attitude)
+            - ( self.p + self.k_integral * self.p @ self.estimated_inertia_tensor ) @ w_b_r_k # Damping term (relative angular velocity)
+            - self.k * self.k_integral * self.p @ state_sum + self.k_integral * self.p @ self.estimated_inertia_tensor @ w_b_r_0 # integral term
+            + self.estimated_inertia_tensor @ (w_r_n_dot_b - np.cross(w_b_n_k, w_r_n_b))  # Inertia term
+        )
+
+        return control_torque
+
+    def get_att_track_state_dot(self, x_k, t):
+
+        # spacecraft
+        mrp_b_n_k = x_k[:3]
+        w_b_n_k = x_k[3:6]
+        state_sum = x_k[6:]
+
+        # target
+        mrp_r_n_k, w_r_n_k, _ = self.get_target_info(t, self.dt)
+
+        # solving for mrp_b_n_dot_k
+        mrp_b_n_norm = np.linalg.norm(mrp_b_n_k)
+        mrp_b_n_tilde = helper_functions.get_tilde_matrix(mrp_b_n_k)
+
+        mrp_b_r_k = self.get_mrp_b_r(mrp_b_n_k, mrp_r_n_k)
+        mrp_b_r_dcm = mrp_functions.mrp_to_dcm(mrp_b_r_k)
+
+        w_b_r_k = w_b_n_k - mrp_b_r_dcm @ w_r_n_k
+
+        mrp_b_n_dot = ( 1/4 ) * ( ( 1 - mrp_b_n_norm**2 ) * np.eye(3) + 2 * mrp_b_n_tilde + 2 * np.outer(mrp_b_n_k, mrp_b_n_k) ) @ w_b_n_k
+
+        # solving for w_b_n_dot_k
+
+        ##### NOTE #### this is not right -> one of the terms canceled in the control law before but no longer the case
+        w_b_n_dot = np.linalg.inv(self.actual_inertia_tensor) @ ( self.get_att_track_control_k(x_k, t) + self.unmodeled_torque ) 
+
+        # tracking state_sum
+        state_sum_dot = mrp_b_r_k
+
+        return np.concatenate( [ mrp_b_n_dot, w_b_n_dot, state_sum_dot, np.array([ 0.0, 0.0, 0.0 ]) ])
+
+    def get_track_error_at_time(self, mrp_sum, time, dt=0.01):
+
+        mrp_b_n_k = mrp_sum[int(time/dt)][:3]
+        mrp_r_n_k = self.get_target_mrp_r_n(time)
+
+        mrp_b_r = self.get_mrp_b_r(mrp_b_n_k, mrp_r_n_k)
+        print(np.linalg.norm(mrp_b_r))
+
+    def get_mean_absolute_error(self, mrp_sum, time_span, dt=0.01):
+        """
+        Calculate the mean absolute error for the attitude tracking over a given time span.
+
+        Args:
+            mrp_sum: Array of MRPs and angular velocities at each time step (state history).
+            time_span: Total simulation time in seconds.
+            dt: Time step size.
+
+        Returns:
+            Mean absolute error (MAE) for attitude tracking.
+        """
+        num_steps = int(time_span / dt)  # Number of time steps
+        error_sum = 0  # Initialize error accumulator
+
+        for i in range(num_steps):
+            current_time = i * dt
+            mrp_b_n_k = mrp_sum[i][:3]  # Extract current MRP_B/N
+            mrp_r_n_k = self.get_target_mrp_r_n(current_time)  # Get target MRP_R/N at current time
+
+            # Compute relative MRP (MRP_B/R)
+            mrp_b_r = self.get_mrp_b_r(mrp_b_n_k, mrp_r_n_k)
+            error_sum += np.linalg.norm(mrp_b_r)  # Add the norm of the relative MRP
+
+        mean_absolute_error = error_sum / num_steps  # Compute the mean of the errors
+        return mean_absolute_error
+    
+    def simulate_system(self):
+
+        mrp_b_r_0 = self.get_mrp_b_r(self.mrp_b_n_0, self.get_target_mrp_r_n(0))
+        mrp_b_r_dcm = mrp_functions.mrp_to_dcm(mrp_b_r_0)
+        w_b_r_0 = self.w_b_n_0 - mrp_b_r_dcm @ self.get_target_w_r_n(0)
+
+        x_0 = np.concatenate([self.mrp_b_n_0, self.w_b_n_0, np.zeros(3), w_b_r_0])
+
+        mrp_sum = integrator.runge_kutta(self.get_att_track_state_dot, x_0, 0, self.total_time, is_mrp=True, dt=self.dt)
+        self.get_track_error_at_time(mrp_sum, 45, dt=self.dt)
