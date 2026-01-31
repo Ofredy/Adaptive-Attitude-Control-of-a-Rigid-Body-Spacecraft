@@ -7,9 +7,13 @@ from att_integrator import AttIntegrator
 ################ PD Controller + Adaptive Inertia Tensor Estimation ################
 
 # inertia tensor
-inertia_tensor = np.array([[ 100.0, 0.0, 0.0 ],
-                           [ 0.0, 75.0, 0.0 ],
-                           [ 0.0, 0.0, 80.0 ]])
+actual_inertia_tensor = np.array([[ 100.0, 0.0, 0.0 ],
+                                  [ 0.0, 75.0, 0.0  ],
+                                  [ 0.0, 0.0, 80.0  ]])
+
+estimated_inertia_tensor = np.array([[ 105.0, 0.0, 0.0 ],
+                                     [ 0.0, 75.0, 0.0  ],
+                                     [ 0.0, 0.0, 80.0  ]])
 
 # feedback gains
 k = 5 # Nm
@@ -28,7 +32,8 @@ unmodeled_torque = np.array([ 0.5, -0.3, 0.2 ])
 # creating simulation env class & running the sim
 pd_controller = AttIntegrator(mrp_b_n_0=mrp_b_n_0, w_b_n_0=w_b_n_0,
                               unmodeled_torque=unmodeled_torque,
-                              actual_inertia_tensor=inertia_tensor, estimated_inertia_tensor=inertia_tensor,
+                              actual_inertia_tensor=actual_inertia_tensor, estimated_inertia_tensor=estimated_inertia_tensor,
+                              learn_inertia=True, gamma=10.0,
                               k=k, k_integral=k_integral, p=p)
 
 pd_controller.simulate_system()

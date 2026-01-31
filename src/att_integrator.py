@@ -3,6 +3,7 @@ import numpy as np
 
 # our imports
 import integrator, helper_functions, mrp_functions
+from performance_plotter import plot_inertia_estimate_history
 
 
 class AttIntegrator:
@@ -12,8 +13,9 @@ class AttIntegrator:
                  unmodeled_torque, 
                  actual_inertia_tensor, estimated_inertia_tensor, 
                  k, k_integral, p, 
+                 learn_inertia=False, gamma=0.01,
                  f=0.05,
-                 total_time=120.0, dt=0.01):
+                 out_dir='sim_results', total_time=120.0, dt=0.01):
         
         # intial conditions
         self.mrp_b_n_0 = mrp_b_n_0
@@ -31,10 +33,15 @@ class AttIntegrator:
         self.k_integral = k_integral
         self.p = p
 
+        # adaptive controller properties
+        self.learn_inertia = learn_inertia
+        self.gamma = gamma
+
         # reference generation frequency
         self.f = f
 
         # sim constants
+        self.out_dir = out_dir
         self.total_time = total_time
         self.dt = dt
 
@@ -100,7 +107,7 @@ class AttIntegrator:
         mrp_b_n_k = x_k[:3]  # MRP_B/N
         w_b_n_k = x_k[3:6]   # Angular velocity_B/N (in B)
         state_sum = x_k[6:9]
-        w_b_r_0 = x_k[9:]
+        w_b_r_0 = x_k[9:12]
 
         # Target info
         mrp_r_n_k, w_r_n_k, w_r_n_dot_k = self.get_target_info(t, self.dt)  # Target MRP and angular velocity
@@ -126,13 +133,66 @@ class AttIntegrator:
         )
 
         return control_torque
+    
+    def get_theta_dot(self, delta_w, mrp_e, mrp_b_n, w_b_n, t):
+        """
+        Adaptive law for diagonal inertia parameters theta_hat = [Jx, Jy, Jz]^T.
+
+        Uses composite error:
+            s = delta_w + k * g(mrp_e)
+        where g is the gradient direction from the log Lyapunov term:
+            g(mrp_e) = 2 * mrp_e / (1 + mrp_e^T mrp_e)
+
+        Regressor is consistent with controller feedforward term:
+            Jh @ (w_r_dot_b - w_tilde @ w_r_b)
+
+        Args:
+            delta_w : (3,) relative angular rate error (e.g., w_b_r)
+            mrp_e   : (3,) attitude error MRPs (sigma_B/R)
+            mrp_b_n : (3,) current attitude MRPs (B/N)
+            w_b_n   : (3,) current body angular velocity (B/N expressed in B)
+            t       : time
+
+        Returns:
+            theta_dot : (3,)
+        """
+
+        # --- target info + transform to body frame ---
+        mrp_r_n, w_r_n, w_r_n_dot = self.get_target_info(t, self.dt)
+        mrp_b_r = self.get_mrp_b_r(mrp_b_n, mrp_r_n)
+
+        dcm_b_r = mrp_functions.mrp_to_dcm(mrp_b_r)     # R -> B
+        w_r_b = dcm_b_r @ w_r_n
+        w_r_dot_b = dcm_b_r @ w_r_n_dot
+
+        # alpha = w_r_dot_b - omega x w_r_b
+        w_tilde = helper_functions.get_tilde_matrix(w_b_n)
+        alpha = w_r_dot_b - w_tilde @ w_r_b
+
+        # --- composite error s from log Lyapunov gradient ---
+        mrp_norm_sq = mrp_e @ mrp_e
+        g = 2.0 * mrp_e / (1.0 + mrp_norm_sq)
+        s = delta_w + self.k * g
+
+        # --- regressor Y for diagonal inertia ---
+        wx, wy, wz = w_b_n
+        Y = np.array([
+            [alpha[0],        wy * wz,        -wy * wz],
+            [-wx * wz,        alpha[1],        wx * wz],
+            [wx * wy,        -wx * wy,         alpha[2]]
+        ])
+
+        # --- adaptive update ---
+        theta_dot = - self.gamma * (Y.T @ s)  # Gamma: diagonal
+
+        return theta_dot
 
     def get_att_track_state_dot(self, x_k, t):
 
         # spacecraft
         mrp_b_n_k = x_k[:3]
         w_b_n_k = x_k[3:6]
-        state_sum = x_k[6:]
+        state_sum = x_k[6:12]
 
         # target
         mrp_r_n_k, w_r_n_k, _ = self.get_target_info(t, self.dt)
@@ -148,6 +208,18 @@ class AttIntegrator:
 
         mrp_b_n_dot = ( 1/4 ) * ( ( 1 - mrp_b_n_norm**2 ) * np.eye(3) + 2 * mrp_b_n_tilde + 2 * np.outer(mrp_b_n_k, mrp_b_n_k) ) @ w_b_n_k
 
+        # solving for theta_dot & updating estimate_inertia_tensor
+        if self.learn_inertia:
+
+            theta_dot = self.get_theta_dot(
+                                               delta_w=w_b_r_k,
+                                               mrp_e=mrp_b_r_k,
+                                               mrp_b_n=mrp_b_n_k,
+                                               w_b_n=w_b_n_k,
+                                               t=t,
+                                           )
+            self.estimated_inertia_tensor = np.diag( x_k[12:15] )
+
         # solving for w_b_n_dot_k
         w_b_n_tilde = helper_functions.get_tilde_matrix(w_b_n_k)     # \tilde{ω}
         w_b_n_dot = np.linalg.inv(self.actual_inertia_tensor) @ ( self.get_att_track_control_k(x_k, t) + self.unmodeled_torque - w_b_n_tilde @ (self.actual_inertia_tensor @ w_b_n_k) ) 
@@ -155,8 +227,18 @@ class AttIntegrator:
         # tracking state_sum
         state_sum_dot = mrp_b_r_k
 
-        return np.concatenate( [ mrp_b_n_dot, w_b_n_dot, state_sum_dot, np.array([ 0.0, 0.0, 0.0 ]) ])
+        x_dot_parts = [
+                    mrp_b_n_dot,
+                    w_b_n_dot,
+                    state_sum_dot, 
+                    np.array([ 0.0, 0.0, 0.0 ])
+                ]
 
+        if self.learn_inertia:
+            x_dot_parts.append(theta_dot)
+        
+        return np.concatenate( x_dot_parts )
+    
     def get_track_error_at_time(self, mrp_sum, time, dt=0.01):
 
         mrp_b_n_k = mrp_sum[int(time/dt)][:3]
@@ -195,10 +277,32 @@ class AttIntegrator:
     def simulate_system(self):
 
         mrp_b_r_0 = self.get_mrp_b_r(self.mrp_b_n_0, self.get_target_mrp_r_n(0))
-        mrp_b_r_dcm = mrp_functions.mrp_to_dcm(mrp_b_r_0)
-        w_b_r_0 = self.w_b_n_0 - mrp_b_r_dcm @ self.get_target_w_r_n(0)
+        dcm_b_r_0 = mrp_functions.mrp_to_dcm(mrp_b_r_0)
+        w_b_r_0   = self.w_b_n_0 - dcm_b_r_0 @ self.get_target_w_r_n(0)
 
-        x_0 = np.concatenate([self.mrp_b_n_0, self.w_b_n_0, np.zeros(3), w_b_r_0])
+        x_parts = [
+            self.mrp_b_n_0,
+            self.w_b_n_0,
+            np.zeros(3),
+            w_b_r_0
+        ]
+
+        if self.learn_inertia:
+            theta_0 = np.diag(self.estimated_inertia_tensor)
+            x_parts.append(theta_0)
+
+        x_0 = np.concatenate(x_parts)
 
         mrp_sum = integrator.runge_kutta(self.get_att_track_state_dot, x_0, 0, self.total_time, is_mrp=True, dt=self.dt)
         self.get_track_error_at_time(mrp_sum, 45, dt=self.dt)
+
+        if self.learn_inertia:
+            plot_inertia_estimate_history(
+                mrp_sum=mrp_sum,
+                dt=self.dt,
+                J_actual=self.actual_inertia_tensor,
+                out_dir=self.out_dir if hasattr(self, "output_dir") else ".",
+                theta_start_idx=12,
+                prefix="att_track",
+                units="kg*m^2",
+            )
