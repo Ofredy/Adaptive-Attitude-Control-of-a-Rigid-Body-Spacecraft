@@ -149,3 +149,80 @@ def plot_inertia_estimate_history(
     plt.close(fig)
 
     return inertia_dir
+
+def plot_mrp_error_history(
+    mrp_err_hist: np.ndarray,
+    dt: float,
+    out_dir: str,
+    prefix: str = "att_track",
+    skip_seconds: float = 0.0,
+):
+    """
+    Plot MRP tracking error sigma_{B/R} over time.
+
+    Accepts:
+      - mrp_err_hist shape (N,3) or (3,N)
+    Saves into:
+      out_dir/plots/mrp_error/
+    """
+    S = np.asarray(mrp_err_hist)
+
+    if S.ndim != 2:
+        raise ValueError("mrp_err_hist must be a 2D array with shape (N,3) or (3,N).")
+
+    # allow (3,N)
+    if S.shape[0] == 3 and S.shape[1] != 3:
+        S = S.T  # -> (N,3)
+
+    if S.shape[1] != 3:
+        raise ValueError(f"mrp_err_hist must have 3 columns (got shape {S.shape}).")
+
+    N = S.shape[0]
+    t = np.arange(N) * dt
+
+    err_dir = os.path.join(out_dir, "plots", "mrp_error")
+    _ensure_dir(err_dir)
+
+    skip = int(skip_seconds / dt) if skip_seconds and skip_seconds > 0 else 0
+    t_plot = t[skip:]
+    S_plot = S[skip:, :]
+    sig_norm = np.linalg.norm(S, axis=1)[skip:]
+
+    # sigma1/2/3
+    for k, name in enumerate(["sigma1", "sigma2", "sigma3"]):
+        fig, ax = plt.subplots()
+        ax.plot(t_plot, S_plot[:, k], linewidth=2)
+        ax.set_xlabel("Time [s]")
+        ax.set_ylabel(name)
+        ax.set_title(f"{name} tracking error (MRP)")
+        ax.grid(True)
+        ax.ticklabel_format(style="plain", axis="y", useOffset=False)
+        fig.savefig(os.path.join(err_dir, f"{prefix}_{name}.png"), dpi=200, bbox_inches="tight")
+        plt.close(fig)
+
+    # norm
+    fig, ax = plt.subplots()
+    ax.plot(t_plot, sig_norm, linewidth=2)
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("||sigma||")
+    ax.set_title("Attitude tracking error norm (MRP)")
+    ax.grid(True)
+    ax.ticklabel_format(style="plain", axis="y", useOffset=False)
+    fig.savefig(os.path.join(err_dir, f"{prefix}_sigma_norm.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    # components overlay
+    fig, ax = plt.subplots()
+    ax.plot(t_plot, S_plot[:, 0], label="sigma1", linewidth=2)
+    ax.plot(t_plot, S_plot[:, 1], label="sigma2", linewidth=2)
+    ax.plot(t_plot, S_plot[:, 2], label="sigma3", linewidth=2)
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("sigma components")
+    ax.set_title("Attitude tracking error components (MRP)")
+    ax.grid(True)
+    ax.legend()
+    ax.ticklabel_format(style="plain", axis="y", useOffset=False)
+    fig.savefig(os.path.join(err_dir, f"{prefix}_sigma_components.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    return err_dir

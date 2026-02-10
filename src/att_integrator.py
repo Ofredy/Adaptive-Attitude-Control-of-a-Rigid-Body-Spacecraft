@@ -3,7 +3,7 @@ import numpy as np
 
 # our imports
 import integrator, helper_functions, mrp_functions
-from performance_plotter import plot_inertia_estimate_history
+from performance_plotter import plot_inertia_estimate_history, plot_mrp_error_history
 
 
 class AttIntegrator:
@@ -215,7 +215,7 @@ class AttIntegrator:
         if self.learn_inertia:
             x_dot_parts.append(theta_dot)
 
-        if int(t / self.dt) % 100 == 0:
+        if int(t / self.dt) % 100 == 0 and self.learn_inertia:
             print("||dw||", np.linalg.norm(w_b_r_k),
                   "||e||", np.linalg.norm(mrp_b_r_k),
                   "||theta_dot||", np.linalg.norm(theta_dot),
@@ -230,6 +230,37 @@ class AttIntegrator:
 
         mrp_b_r = self.get_mrp_b_r(mrp_b_n_k, mrp_r_n_k)
         print(np.linalg.norm(mrp_b_r))
+
+    def compute_track_error_history(self, t_0=0.0, dt=None):
+        """
+        Computes sigma_{B/R}(t) for the whole sim using:
+          mrp_b_n(t) from mrp_sum
+          mrp_r_n(t) from self.get_target_mrp_r_n(t)
+          sigma_b_r(t) = self.get_mrp_b_r(mrp_b_n, mrp_r_n)
+
+        Returns:
+          mrp_err_hist: (N,3)
+          t_hist: (N,)
+        """
+        if dt is None:
+            dt = self.dt
+
+        X = np.asarray(self.mrp_sum)
+        # support (N,nx) or (nx,N)
+        if X.ndim != 2:
+            raise ValueError("mrp_sum must be 2D.")
+        # if it looks like (nx, N), transpose to (N, nx)
+        if X.shape[0] in (18, 6, 12) and X.shape[1] != X.shape[0]:
+            X = X.T
+
+        N = X.shape[0]
+        t_hist = t_0 + np.arange(N) * dt
+        self.mrp_err_hist = np.zeros((N, 3))
+
+        for i, t in enumerate(t_hist):
+            mrp_b_n = X[i, 0:3]
+            mrp_r_n = self.get_target_mrp_r_n(t)
+            self.mrp_err_hist[i, :] = self.get_mrp_b_r(mrp_b_n, mrp_r_n)
 
     def get_mean_absolute_error(self, mrp_sum, time_span, dt=0.01):
         """
@@ -277,12 +308,21 @@ class AttIntegrator:
 
         x_0 = np.concatenate(x_parts)
 
-        mrp_sum = integrator.runge_kutta(self.get_att_track_state_dot, x_0, 0, self.total_time, is_mrp=True, dt=self.dt)
-        self.get_track_error_at_time(mrp_sum, 45, dt=self.dt)
+        self.mrp_sum = integrator.runge_kutta(self.get_att_track_state_dot, x_0, 0, self.total_time, is_mrp=True, dt=self.dt)
+        self.get_track_error_at_time(self.mrp_sum, 45, dt=self.dt)
+
+        self.compute_track_error_history()
+
+        plot_mrp_error_history(
+                                   mrp_err_hist=np.asarray(self.mrp_err_hist)[:, 0:3],
+                                   dt=self.dt,
+                                   out_dir=self.out_dir if hasattr(self, "output_dir") else ".",
+                                   prefix="att_track",
+                               )
 
         if self.learn_inertia:
             plot_inertia_estimate_history(
-                mrp_sum=mrp_sum,
+                mrp_sum=self.mrp_sum,
                 dt=self.dt,
                 J_actual=self.actual_inertia_tensor,
                 out_dir=self.out_dir if hasattr(self, "output_dir") else ".",
