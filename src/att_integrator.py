@@ -13,7 +13,7 @@ class AttIntegrator:
                  unmodeled_torque, 
                  actual_inertia_tensor, estimated_inertia_tensor, 
                  k, k_integral, p, 
-                 learn_inertia=False, gamma=0.01,
+                 learn_inertia=False, gamma=0.01, initial_std=1,
                  f=0.05,
                  out_dir='sim_results', total_time=120.0, dt=0.01):
         
@@ -26,7 +26,6 @@ class AttIntegrator:
 
         # inertia tensor properties
         self.actual_inertia_tensor = actual_inertia_tensor
-        self.estimated_inertia_tensor = estimated_inertia_tensor
 
         # feedback gain terms
         self.k = k 
@@ -34,8 +33,20 @@ class AttIntegrator:
         self.p = p
 
         # adaptive controller properties
+        self.predicted_mrp_b_n_0 = mrp_b_n_0 # same initial conditions for the controller integrator
+        self.predicted_w_b_n_0 = w_b_n_0
+
         self.learn_inertia = learn_inertia
         self.gamma = gamma
+
+        self.theta = np.random.normal(
+                                          loc=0.0,        # mean
+                                          scale=initial_std,      # standard deviation you choose
+                                          size=3          # assuming 3 inertia parameters
+                                      )
+
+        self.estimated_inertia_tensor_t0 = estimated_inertia_tensor
+        self.estimated_inertia_tensor = estimated_inertia_tensor
 
         # reference generation frequency
         self.f = f
@@ -153,22 +164,16 @@ class AttIntegrator:
 
         return control_torque
     
-    def get_theta_dot(self, w_b_n, w_b_n_dot, delta_w, mrp_e):
-        # sliding/composite signal (needs to be nonzero to learn)
-        lam = 1.0  # try 0.5 to 2.0
-        s = delta_w + lam * mrp_e
+    def get_theta_dot(self, w_b_n_dot, predicted_w_b_n_dot, w_b_n, predicted_w_b_n, mrp_b_n, predicted_mrp_b_n):
 
-        wx, wy, wz = w_b_n
-        wdx, wdy, wdz = w_b_n_dot
+        delta_wp_dot = w_b_n_dot - predicted_w_b_n_dot
+        
+        delta_wp = w_b_n - predicted_w_b_n
+        mrp_p = mrp_functions.mrp_addition(mrp_b_n, mrp_functions.invert_mrp(predicted_mrp_b_n))
 
-        Y = np.array([
-            [wdx,  wy*wz,  -wy*wz],
-            [-wz*wx, wdy,   wz*wx],
-            [wx*wy, -wx*wy, wdz],
-        ])
+        theta_inv = 1 / self.theta
 
-        Gamma = self.gamma * np.eye(3)  # gamma is now a real gain, not divided by J^2
-        theta_dot = -Gamma @ (Y.T @ s)
+        theta_dot = -self.gamma * ( theta_inv @ delta_wp ) * ( self.k * mrp_p - delta_wp_dot )
 
         return theta_dot
 
@@ -178,6 +183,11 @@ class AttIntegrator:
         mrp_b_n_k = x_k[:3]
         w_b_n_k = x_k[3:6]
         state_sum = x_k[6:12]
+
+        # controller predictions
+        predicted_mrp_b_n_k = x_k[12:15]
+        predicted_w_b_n_k = x_k[15:18]
+        theta_k = x_k[18:21]
 
         # target
         mrp_r_n_k, w_r_n_k, _ = self.get_target_info(t, self.dt)
@@ -193,14 +203,20 @@ class AttIntegrator:
 
         mrp_b_n_dot = ( 1/4 ) * ( ( 1 - mrp_b_n_norm**2 ) * np.eye(3) + 2 * mrp_b_n_tilde + 2 * np.outer(mrp_b_n_k, mrp_b_n_k) ) @ w_b_n_k
 
+        if self.learn_inertia:
+            self.estimated_inertia_tensor = self.estimated_inertia_tensor_t0 + np.diag(theta_k)
+
         # solving for w_b_n_dot_k
         w_b_n_tilde = helper_functions.get_tilde_matrix(w_b_n_k)     # \tilde{ω}
         w_b_n_dot = np.linalg.inv(self.actual_inertia_tensor) @ ( self.get_att_track_control_k(x_k, t) + self.unmodeled_torque - w_b_n_tilde @ (self.actual_inertia_tensor @ w_b_n_k) ) 
 
-        # solving for theta_dot & updating estimate_inertia_tensor
         if self.learn_inertia:
-            theta_dot = self.get_theta_dot(w_b_n=w_b_n_k, w_b_n_dot=w_b_n_dot, delta_w=w_b_r_k, mrp_e=mrp_b_r_k)
-            self.estimated_inertia_tensor = np.diag(x_k[12:15])
+            # solving for predicted_w_b_n_dot_k         
+            predicted_w_b_n_tilde = helper_functions.get_tilde_matrix(predicted_w_b_n_k)     # \tilde{ω}
+            predicted_w_b_n_dot = np.linalg.inv(self.estimated_inertia_tensor) @ ( self.get_att_track_control_k(x_k, t) + self.unmodeled_torque - predicted_w_b_n_tilde @ (self.estimated_inertia_tensor @ predicted_w_b_n_k) ) 
+
+            # solving for theta_dot & updating estimate_inertia_tensor
+            theta_dot = self.get_theta_dot(w_b_n_dot, predicted_w_b_n_dot, w_b_n_k, predicted_w_b_n_k, mrp_b_n_k, predicted_mrp_b_n_k)
 
         # tracking state_sum
         state_sum_dot = mrp_b_r_k
@@ -213,13 +229,16 @@ class AttIntegrator:
                 ]
 
         if self.learn_inertia:
+            x_dot_parts.append(predicted_w_b_n_k)
+            x_dot_parts.append(predicted_w_b_n_dot)
             x_dot_parts.append(theta_dot)
 
         if int(t / self.dt) % 100 == 0 and self.learn_inertia:
             print("||dw||", np.linalg.norm(w_b_r_k),
                   "||e||", np.linalg.norm(mrp_b_r_k),
                   "||theta_dot||", np.linalg.norm(theta_dot),
-                  "Inertia Estimate diag:", np.diag(self.estimated_inertia_tensor))
+                  "Inertia Estimate diag:", np.diag(self.estimated_inertia_tensor)
+                  )
 
         return np.concatenate( x_dot_parts )
     
@@ -303,8 +322,9 @@ class AttIntegrator:
         ]
 
         if self.learn_inertia:
-            theta_0 = np.diag(self.estimated_inertia_tensor)
-            x_parts.append(theta_0)
+            x_parts.append(self.predicted_mrp_b_n_0)
+            x_parts.append(self.predicted_w_b_n_0)
+            x_parts.append(self.theta)
 
         x_0 = np.concatenate(x_parts)
 
@@ -325,8 +345,9 @@ class AttIntegrator:
                 mrp_sum=self.mrp_sum,
                 dt=self.dt,
                 J_actual=self.actual_inertia_tensor,
+                estimated_inertia_t0=self.estimated_inertia_tensor_t0,
                 out_dir=self.out_dir if hasattr(self, "output_dir") else ".",
-                theta_start_idx=12,
+                theta_start_idx=18,
                 prefix="att_track",
                 units="kg*m^2",
             )

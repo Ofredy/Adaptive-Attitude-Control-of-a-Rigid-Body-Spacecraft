@@ -12,11 +12,12 @@ def plot_inertia_estimate_history(
     mrp_sum: np.ndarray,
     dt: float,
     J_actual: np.ndarray,
+    estimated_inertia_t0: np.ndarray, 
     out_dir: str,
     theta_start_idx: int = 12,
     prefix: str = "att_track",
     units: str = "kg*m^2",
-    y_window_frac: float = 0.02,   # +/- 2% window around truth (set None to disable)
+    y_window_frac: float = None,   # +/- 2% window around truth (set None to disable)
     skip_seconds: float = 0.0,     # skip initial transient time for nicer plots
     save_error_plots: bool = True,
 ):
@@ -69,6 +70,7 @@ def plot_inertia_estimate_history(
 
     t = np.arange(N) * dt
     theta_hist = X[:, theta_slice]  # (N,3)
+    theta_hist = np.diag(estimated_inertia_t0) + theta_hist
 
     J_actual_diag = np.diag(np.asarray(J_actual)).reshape(3,)
 

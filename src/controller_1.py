@@ -11,29 +11,29 @@ actual_inertia_tensor = np.array([[ 100.0, 0.0, 0.0 ],
                                   [ 0.0, 75.0, 0.0  ],
                                   [ 0.0, 0.0, 80.0  ]])
 
-estimated_inertia_tensor = np.array([[ 100.0, 0.0, 0.0 ],
-                                     [ 0.0, 75.0, 0.0  ],
-                                     [ 0.0, 0.0, 80.0  ]])
+estimated_inertia_tensor = np.array([[ 102.0, 0.0, 0.0 ],
+                                     [ 0.0, 73.0, 0.0  ],
+                                     [ 0.0, 0.0, 82.0  ]])
 
 # feedback gains
-k = 5.0 # Nm
-k_integral = 0.005 # Nm
-p = np.array([[ 10.0, 0.0, 0.0 ],
-              [ 0.0, 10.0, 0.0 ],
-              [ 0.0, 0.0, 10.0 ]])
+k = 0.5 # Nm
+k_integral = 0.000 # Nm
+p = np.array([[ 1.0, 0.0, 0.0 ],
+              [ 0.0, 1.0, 0.0 ],
+              [ 0.0, 0.0, 1.0 ]])
 
 # intial conditions
 mrp_b_n_0 = np.array([ 0.1, 0.2, -0.1 ])
 w_b_n_0 = np.array([ 3.0, 1.0, -2.0 ]) * np.pi / 180
 
 # unmodeled torque properties
-unmodeled_torque = np.array([ 0.5, -0.3, 0.2 ])
+unmodeled_torque = np.array([ 0.0, 0.0, 0.0 ])
 
 # creating simulation env class & running the sim
 pd_controller = AttIntegrator(mrp_b_n_0=mrp_b_n_0, w_b_n_0=w_b_n_0,
                               unmodeled_torque=unmodeled_torque,
                               actual_inertia_tensor=actual_inertia_tensor, estimated_inertia_tensor=estimated_inertia_tensor,
-                              learn_inertia=False, gamma=0.0,
+                              learn_inertia=True, gamma=2.0,
                               k=k, k_integral=k_integral, p=p,
                               total_time=500)
 
